@@ -2,7 +2,7 @@
 // @name         B站播放器视频倍速调节
 // @namespace    http://tampermonkey.net/
 // @version      1.4
-// @description  滚轮调节+异步弹窗+C键切换+绿色提示+[修复卡顿]+兼容原生
+// @description  滚轮调节+C键切换+兼容原生和其他html5插件+[修复卡顿]
 // @author       deepseek
 // @match        *://*/*
 // @grant        none
