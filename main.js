@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站播放器视频倍速调节
 // @namespace    http://tampermonkey.net/
-// @version      1.4
-// @description  滚轮调节+C键切换+兼容原生和其他html5插件+[修复卡顿]
+// @version      1.5
+// @description  滚轮调节+C/X/Z键调节+兼容原生和其他html5插件+[修复卡顿]
 // @author       deepseek
 // @match        *://*/*
 // @grant        none
@@ -16,7 +16,7 @@
     let isInSpeedBox = false;
     let dialogActive = false;
 
-    // 创建绿色提示框
+    // 创建绿色提示框（保持不变）
     function createNotification(speed) {
         if (currentNotification) {
             document.body.removeChild(currentNotification);
@@ -59,7 +59,7 @@
         }, 700);
     }
 
-    // 异步输入对话框
+// 异步输入对话框
     function createAsyncDialog() {
         if (dialogActive) return;
         dialogActive = true;
@@ -204,10 +204,11 @@
         });
     }
 
-    // C键切换功能
+    // 新增快捷键监听功能（修改部分）
     function addShortcutListener() {
         document.addEventListener('keydown', function(e) {
-            if (e.key.toLowerCase() === 'c' &&
+            const key = e.key.toLowerCase();
+            if ((key === 'z' || key === 'x' || key === 'c') &&
                 !e.ctrlKey &&
                 !e.altKey &&
                 !e.metaKey &&
@@ -216,17 +217,42 @@
                 const video = document.querySelector('video');
                 if (video) {
                     e.preventDefault();
-                    const newSpeed = video.playbackRate === 1.0 ? lastCustomSpeed : 1.0;
-                    lastCustomSpeed = video.playbackRate === 1.0 ? lastCustomSpeed : video.playbackRate;
-                    video.playbackRate = newSpeed;
-                    createNotification(newSpeed);
-                    updateActiveState(newSpeed);
+
+                    // Z键：切换基准速度
+                    if (key === 'z') {
+                        if (video.playbackRate === 1.0) {
+                            video.playbackRate = lastCustomSpeed;
+                        } else {
+                            lastCustomSpeed = video.playbackRate;
+                            video.playbackRate = 1.0;
+                        }
+                        createNotification(video.playbackRate);
+                        updateActiveState(video.playbackRate);
+                    }
+                    // X键：减速
+                    else if (key === 'x') {
+                        let newSpeed = video.playbackRate - 0.1;
+                        newSpeed = Math.round(newSpeed * 10) / 10;
+                        newSpeed = Math.max(0.1, newSpeed);
+                        video.playbackRate = newSpeed;
+                        createNotification(newSpeed);
+                        updateActiveState(newSpeed);
+                    }
+                    // C键：加速
+                    else if (key === 'c') {
+                        let newSpeed = video.playbackRate + 0.1;
+                        newSpeed = Math.round(newSpeed * 10) / 10;
+                        newSpeed = Math.min(16, newSpeed);
+                        video.playbackRate = newSpeed;
+                        createNotification(newSpeed);
+                        updateActiveState(newSpeed);
+                    }
                 }
             }
         });
     }
 
-    // 滚轮事件处理
+// 滚轮事件处理
     function handleWheelEvent(e) {
         if (!isInSpeedBox) return;
 
