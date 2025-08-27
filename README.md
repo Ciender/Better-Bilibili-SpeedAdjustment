@@ -1,6 +1,6 @@
 # Better_Bilibili_SpeedAdjustment
 更好的B站播放器视频倍速调节  
-滚轮调节+C键切换+兼容原生和其他html5插件+[修复卡顿]  
+滚轮调节+C键切换+兼容原生和其他html5插件+剩余时间 
 
 
 食用  
