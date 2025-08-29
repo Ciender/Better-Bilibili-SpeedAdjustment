@@ -1,22 +1,26 @@
 // ==UserScript==
 // @name         更好的B站播放器视频倍速调节
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.3
 // @description  滚轮调节+C/X/Z键调节+兼容原生和其他html5插件+显示剩余时间
-// @match        *://*/*
+// @match        *://*.bilibili.com/*
 // @grant        none
 // ==/UserScript==
 
 (function() {
     'use strict';
 
+    // --- Script state variables ---
     let lastCustomSpeed = 1.0;
     let currentNotification = null;
     let notificationTimer = null;
     let isInSpeedBox = false;
     let dialogActive = false;
     let notificationStyleAdded = false;
-    let speedTimeDisplay = null;
+
+    // --- References to our custom UI elements ---
+    let timeDisplayLine1 = null; // Reference to our new Line 1 (Current / Total)
+    let speedTimeDisplayLine2 = null; // Reference to our new Line 2 (Speed, Remaining)
     let timeUpdateThrottleTimer = null;
 
     // --- Helper Functions ---
@@ -86,39 +90,97 @@
 
     // --- UI Elements ---
 
-    function updateSpeedTimeDisplay() {
+    // --- Start of modification: New implementation with "Ghost Overlay" technique ---
+
+    /**
+     * This function now handles updating BOTH lines of our custom display.
+     */
+    function updateCustomDisplays() {
         const video = document.querySelector('video');
-        if (!video || !speedTimeDisplay) return;
-        const speed = video.playbackRate;
-        const remainingSeconds = (video.duration - video.currentTime) / speed;
-        const formattedSpeed = `${speed.toFixed(1)}x`;
-        const formattedTime = formatRemainingTimeCompact(remainingSeconds);
-        speedTimeDisplay.textContent = `(${formattedSpeed}, -${formattedTime})`;
+        if (!video) return;
+
+        // Update Line 1: Current / Total Time
+        // We read the data from the original (but now invisible) spans.
+        if (timeDisplayLine1) {
+            const currentSpan = document.querySelector('.bpx-player-ctrl-time-current');
+            const durationSpan = document.querySelector('.bpx-player-ctrl-time-duration');
+            if (currentSpan && durationSpan) {
+                timeDisplayLine1.textContent = `${currentSpan.textContent} / ${durationSpan.textContent}`;
+            }
+        }
+
+        // Update Line 2: Speed and Remaining Time
+        if (speedTimeDisplayLine2) {
+            const speed = video.playbackRate;
+            const remainingSeconds = (video.duration - video.currentTime) / speed;
+            const formattedSpeed = `${speed.toFixed(1)}x`;
+            const formattedTime = formatRemainingTimeCompact(remainingSeconds);
+            speedTimeDisplayLine2.textContent = `(${formattedSpeed}, -${formattedTime})`;
+        }
     }
 
-    // --- Start of modification: New implementation for the display element ---
+    /**
+     * This function completely restyles the time display area using the "Ghost Overlay" method.
+     */
     function setupSpeedTimeDisplay() {
-        // Only run if the element doesn't exist yet
-        if (document.getElementById('custom-speed-time-display')) return;
+        if (document.getElementById('custom-time-container')) return;
 
-        // Find the duration span element, which is our new anchor
-        const anchorElement = document.querySelector('.bpx-player-ctrl-time-duration');
-        if (!anchorElement) return; // Anchor not found, try again later
+        const timeContainer = document.querySelector('.bpx-player-ctrl-time');
+        const originalTimeLabel = timeContainer ? timeContainer.querySelector('.bpx-player-ctrl-time-label') : null;
 
-        // Create a SPAN element to insert
-        const displaySpan = document.createElement('span');
-        displaySpan.id = 'custom-speed-time-display';
+        if (!timeContainer || !originalTimeLabel) return;
 
-        // Add minimal styling. It will inherit font, color, size, etc. from its parent.
-        displaySpan.style.marginLeft = '10px'; // Add some space
-        displaySpan.style.whiteSpace = 'nowrap';
+        // 1. Style the parent container to be a positioning context for the ghost overlay.
+        timeContainer.style.position = 'relative';
+        timeContainer.style.display = 'flex';
+        timeContainer.style.justifyContent = 'center';
+        timeContainer.style.alignItems = 'center';
+        timeContainer.style.width = '120px';
 
-        displaySpan.textContent = '(1.0x, --:--)'; // Initial placeholder text
+        // 2. Create our new 2-line visual framework. This is what the user SEES.
+        const newContainer = document.createElement('div');
+        newContainer.id = 'custom-time-container';
+        newContainer.style.cssText = `
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            line-height: 1.2;
+            pointer-events: none; /* Make our visual display non-interactive */
+        `;
 
-        // Insert the new element right after the duration span
-        anchorElement.insertAdjacentElement('afterend', displaySpan);
-        speedTimeDisplay = displaySpan; // Store a reference to the element
-        console.log("Bili Speed Control: Speed/Time display added next to duration.");
+        const line1 = document.createElement('div');
+        line1.id = 'custom-time-display';
+        line1.style.fontSize = '13px';
+        line1.style.color = '#e0e0e0';
+
+        const line2 = document.createElement('div');
+        line2.id = 'custom-speed-time-display';
+        line2.style.fontSize = '12px';
+        line2.style.color = '#999';
+
+        newContainer.append(line1, line2);
+        timeContainer.appendChild(newContainer);
+
+        // 3. Turn the ORIGINAL time label into an invisible "Ghost Overlay".
+        // This is what the user CLICKS.
+        originalTimeLabel.style.cssText = `
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            opacity: 0; /* Make it invisible */
+            z-index: 1; /* Ensure it's on top */
+            cursor: pointer; /* Show the correct cursor on hover */
+        `;
+
+        // Store references to our new elements
+        timeDisplayLine1 = line1;
+        speedTimeDisplayLine2 = line2;
+
+        console.log("Bili Speed Control: Centered display with ghost overlay created.");
+        updateCustomDisplays();
     }
     // --- End of modification ---
 
@@ -126,7 +188,6 @@
         if (currentNotification && currentNotification.parentNode) {
             currentNotification.parentNode.removeChild(currentNotification);
             clearTimeout(notificationTimer);
-            currentNotification = null;
         }
         ensureNotificationStyle();
         const video = document.querySelector('video');
@@ -142,8 +203,7 @@
 
         let notificationText = `倍速: ${speed.toFixed(1)}x`;
         if (video && video.duration && isFinite(video.duration) && speed > 0) {
-            const remainingSeconds = video.duration - video.currentTime;
-            const remainingTimeAtNewSpeed = remainingSeconds / speed;
+            const remainingTimeAtNewSpeed = (video.duration - video.currentTime) / speed;
             const formattedTime = formatRemainingTime(remainingTimeAtNewSpeed);
             if (formattedTime) {
                 notificationText += `<br><span style="font-size: 14px; font-weight: normal;">${formattedTime}</span>`;
@@ -155,15 +215,14 @@
         currentNotification = div;
         notificationTimer = setTimeout(() => {
             if (div.parentNode) div.parentNode.removeChild(div);
-            if (currentNotification === div) currentNotification = null;
+            currentNotification = null;
         }, 800);
     }
 
     // --- Event Listeners ---
 
     function initVideoListener(video) {
-        if (!window.biliSpeedVideoListeners) window.biliSpeedVideoListeners = new WeakMap();
-        if (window.biliSpeedVideoListeners.has(video)) return;
+        if (window.biliSpeedVideoListeners && window.biliSpeedVideoListeners.has(video)) return;
 
         video.addEventListener('ratechange', () => {
             const currentSpeed = video.playbackRate;
@@ -171,25 +230,26 @@
                 lastCustomSpeed = currentSpeed;
             }
             updateActiveState(currentSpeed);
-            updateSpeedTimeDisplay();
+            updateCustomDisplays();
         });
 
         const throttledUpdate = () => {
             if (timeUpdateThrottleTimer) return;
             timeUpdateThrottleTimer = setTimeout(() => {
-                updateSpeedTimeDisplay();
+                updateCustomDisplays();
                 timeUpdateThrottleTimer = null;
-            }, 500);
+            }, 250);
         };
         video.addEventListener('timeupdate', throttledUpdate);
-        video.addEventListener('loadedmetadata', updateSpeedTimeDisplay);
-        video.addEventListener('seeked', updateSpeedTimeDisplay);
+        video.addEventListener('loadedmetadata', updateCustomDisplays);
+        video.addEventListener('seeked', updateCustomDisplays);
 
+        if (!window.biliSpeedVideoListeners) window.biliSpeedVideoListeners = new WeakMap();
         window.biliSpeedVideoListeners.set(video, true);
         console.log("Bili Speed Control: Listeners added to video element.");
 
         updateActiveState(video.playbackRate);
-        updateSpeedTimeDisplay();
+        updateCustomDisplays();
         if (video.playbackRate !== 1.0) {
             lastCustomSpeed = video.playbackRate;
         }
@@ -202,44 +262,29 @@
     const observer = new MutationObserver(() => {
         requestAnimationFrame(() => {
             const video = document.querySelector('video');
-            const speedBox = document.querySelector('.bpx-player-ctrl-playbackrate');
-            const menu = document.querySelector('.bpx-player-ctrl-playbackrate-menu');
-            setupSpeedTimeDisplay();
-            if (speedBox) initWheelControl(speedBox);
-            if (menu && !menu.querySelector('.custom-speed')) {
-                menu.appendChild(createCustomSpeedItem());
-                console.log("Bili Speed Control: Custom speed menu item added.");
-            }
             if (video) {
+                setupSpeedTimeDisplay();
                 initVideoListener(video);
                 addShortcutListener();
+            }
+            const speedBox = document.querySelector('.bpx-player-ctrl-playbackrate');
+            if (speedBox) initWheelControl(speedBox);
+
+            const menu = document.querySelector('.bpx-player-ctrl-playbackrate-menu');
+            if (menu && !menu.querySelector('.custom-speed')) {
+                menu.appendChild(createCustomSpeedItem());
             }
         });
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
 
-    setTimeout(() => {
-        const video = document.querySelector('video');
-        const speedBox = document.querySelector('.bpx-player-ctrl-playbackrate');
-        const menu = document.querySelector('.bpx-player-ctrl-playbackrate-menu');
-        setupSpeedTimeDisplay();
-        if (video) {
-            initVideoListener(video);
-            addShortcutListener();
-        }
-        if (speedBox) initWheelControl(speedBox);
-        if (menu && !menu.querySelector('.custom-speed')) {
-            menu.appendChild(createCustomSpeedItem());
-        }
-    }, 1000);
-
-    // --- Unchanged Functions (collapsed for brevity) ---
-    function createAsyncDialog(){if(dialogActive)return;dialogActive=!0;const e=document.querySelector("video"),t=getPlayerContainer(e),o=document.createElement("div");o.style.cssText="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 2147483646; display: flex; justify-content: center; align-items: center;";t===document.body&&(o.style.position="fixed");const n=document.createElement("div");n.style.cssText="background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); min-width: 300px; box-sizing: border-box;";n.addEventListener("click",e=>e.stopPropagation());const i=document.createElement("div");i.textContent="设置播放速度 (0.1 - 16.0)";i.style.cssText="font-size: 18px; margin-bottom: 20px; font-weight: bold; color: #333; text-align: center;";const d=document.createElement("input");d.type="number";d.step="0.1";d.min="0.1";d.max="16";const l=e?e.playbackRate:lastCustomSpeed;d.value=l.toFixed(1);d.style.cssText="width: 100%; padding: 10px 14px; margin-bottom: 20px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; box-sizing: border-box; text-align: center;";const a=document.createElement("div");a.style.cssText="display: flex; justify-content: space-around; gap: 10px;";const c=document.createElement("button");c.textContent="确定";c.style.cssText="padding: 8px 20px; background: #00a1d6; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 14px; flex-grow: 1;";c.onmouseover=()=>c.style.background="#00b5e5";c.onmouseout=()=>c.style.background="#00a1d6";const s=document.createElement("button");s.textContent="取消";s.style.cssText="padding: 8px 20px; background: #f0f0f0; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; font-size: 14px; color: #555; flex-grow: 1;";s.onmouseover=()=>s.style.background="#e0e0e0";s.onmouseout=()=>s.style.background="#f0f0f0";const r=()=>{o.parentNode&&o.parentNode.removeChild(o);dialogActive=!1;document.activeElement?.blur();(t!==document.body?t:document.body).focus()},p=()=>{const e=parseFloat(d.value);if(!isNaN(e)&&e>=.1&&e<=16){const t=document.querySelector("video");t&&(t.playbackRate=e,createNotification(e));r()}else{d.style.borderColor="#ff4d4d";d.style.outline="1px solid #ff4d4d";setTimeout(()=>{d.style.borderColor="#ccc";d.style.outline="none"},1e3);d.focus();d.select()}};o.addEventListener("click",r);s.addEventListener("click",r);c.addEventListener("click",p);d.addEventListener("keydown",e=>{e.key==="Enter"?(e.preventDefault(),p()):e.key==="Escape"&&r()});a.append(s,c);n.append(i,d,a);o.appendChild(n);requestAnimationFrame(()=>{d.focus();d.select()})}
-    function createCustomSpeedItem(){const e=document.createElement("li");e.className="bpx-player-ctrl-playbackrate-menu-item custom-speed";e.textContent="自定义倍速";e.style.cursor="pointer";e.style.padding="1x 1x";e.style.textAlign="center";e.addEventListener("click",e=>{e.stopPropagation();dialogActive||createAsyncDialog()});e.onmouseover=()=>e.style.backgroundColor="rgba(255, 255, 255, 0.1)";e.onmouseout=()=>e.style.backgroundColor="";return e}
+    // --- Unchanged Functions (Formatted for readability) ---
+    function createAsyncDialog(){if(dialogActive)return;dialogActive=!0;const e=document.querySelector("video"),t=getPlayerContainer(e),o=document.createElement("div");o.style.cssText="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 2147483646; display: flex; justify-content: center; align-items: center;",t===document.body&&(o.style.position="fixed");const n=document.createElement("div");n.style.cssText="background: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); min-width: 300px; box-sizing: border-box;",n.addEventListener("click",e=>e.stopPropagation());const i=document.createElement("div");i.textContent="设置播放速度 (0.1 - 16.0)",i.style.cssText="font-size: 18px; margin-bottom: 20px; font-weight: bold; color: #333; text-align: center;";const d=document.createElement("input");d.type="number",d.step="0.1",d.min="0.1",d.max="16";const l=e?e.playbackRate:lastCustomSpeed;d.value=l.toFixed(1),d.style.cssText="width: 100%; padding: 10px 14px; margin-bottom: 20px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; box-sizing: border-box; text-align: center;";const a=document.createElement("div");a.style.cssText="display: flex; justify-content: space-around; gap: 10px;";const c=document.createElement("button");c.textContent="确定",c.style.cssText="padding: 8px 20px; background: #00a1d6; border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 14px; flex-grow: 1;",c.onmouseover=()=>c.style.background="#00b5e5",c.onmouseout=()=>c.style.background="#00a1d6";const s=document.createElement("button");s.textContent="取消",s.style.cssText="padding: 8px 20px; background: #f0f0f0; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; font-size: 14px; color: #555; flex-grow: 1;",s.onmouseover=()=>s.style.background="#e0e0e0",s.onmouseout=()=>s.style.background="#f0f0f0";const r=()=>{o.parentNode&&o.parentNode.removeChild(o),dialogActive=!1,document.activeElement?.blur(),(t!==document.body?t:document.body).focus()},p=()=>{const e=parseFloat(d.value);if(!isNaN(e)&&e>=.1&&e<=16){const t=document.querySelector("video");t&&(t.playbackRate=e,createNotification(e)),r()}else d.style.borderColor="#ff4d4d",d.style.outline="1px solid #ff4d4d",setTimeout(()=>{d.style.borderColor="#ccc",d.style.outline="none"},1e3),d.focus(),d.select()};o.addEventListener("click",r),s.addEventListener("click",r),c.addEventListener("click",p),d.addEventListener("keydown",e=>{e.key==="Enter"?(e.preventDefault(),p()):e.key==="Escape"&&r()}),a.append(s,c),n.append(i,d,a),o.appendChild(n),t.appendChild(o),requestAnimationFrame(()=>{d.focus(),d.select()})}
+    function createCustomSpeedItem(){const e=document.createElement("li");return e.className="bpx-player-ctrl-playbackrate-menu-item custom-speed",e.textContent="自定义倍速",e.style.cursor="pointer",e.style.padding="1x 1x",e.style.textAlign="center",e.addEventListener("click",e=>{e.stopPropagation(),dialogActive||createAsyncDialog()}),e.onmouseover=()=>e.style.backgroundColor="rgba(255, 255, 255, 0.1)",e.onmouseout=()=>e.style.backgroundColor="",e}
     function updateActiveState(e){let t=!1;document.querySelectorAll(".bpx-player-ctrl-playbackrate-menu-item").forEach(o=>{if(!o.classList.contains("custom-speed")){const n=parseFloat(o.dataset.value||o.getAttribute("data-value")||"0");n&&Math.abs(n-e)<.01?(o.classList.add("active"),t=!0):o.classList.remove("active")}});const o=document.querySelector(".custom-speed");o&&o.classList.remove("active");const n=document.querySelector(".bpx-player-ctrl-playbackrate .bpx-player-ctrl-playbackrate-result");n&&(n.textContent=`${e.toFixed(1)}x`)}
-    function addShortcutListener(){if("true"===document.body.dataset.biliSpeedKeyListener)return;document.addEventListener("keydown",function(e){if(dialogActive||e.target.matches("input, textarea, [contenteditable]"))return;const t=e.key.toLowerCase(),o=document.querySelector("video");if(o&&("z"===t||"x"===t||"c"===t)&&!e.ctrlKey&&!e.altKey&&!e.metaKey){e.preventDefault();e.stopPropagation();let n=o.playbackRate;"z"===t?Math.abs(o.playbackRate-1)<.01?n=lastCustomSpeed:(lastCustomSpeed=o.playbackRate,n=1):"x"===t?n=Math.max(.1,Math.round(10*(o.playbackRate-.1))/10):"c"===t&&(n=Math.min(16,Math.round(10*(o.playbackRate+.1))/10));Math.abs(o.playbackRate-n)>.01&&(o.playbackRate=n,createNotification(n))}},!0);document.body.dataset.biliSpeedKeyListener="true";console.log("Bili Speed Control: Keyboard shortcut listener added.")}
-    function handleWheelEvent(e){if(!isInSpeedBox)return;e.preventDefault();e.stopPropagation();const t=document.querySelector("video");if(!t)return;const o=-.1*Math.sign(e.deltaY);let n=t.playbackRate+o;n=Math.max(.1,Math.min(16,n));n=Math.round(10*n)/10;Math.abs(t.playbackRate-n)>.01&&(t.playbackRate=n,createNotification(n))}
-    function initWheelControl(e){if("true"===e.dataset.biliSpeedWheelAdded)return;e.addEventListener("mouseenter",()=>{isInSpeedBox=!0;e.style.cursor="ns-resize"});e.addEventListener("mouseleave",()=>{isInSpeedBox=!1;e.style.cursor=""});e.addEventListener("wheel",handleWheelEvent,{passive:!1});e.dataset.biliSpeedWheelAdded="true";console.log("Bili Speed Control: Wheel control added to speed box.")}
+    function addShortcutListener(){if("true"===document.body.dataset.biliSpeedKeyListener)return;document.addEventListener("keydown",function(e){if(dialogActive||e.target.matches("input, textarea, [contenteditable]"))return;const t=e.key.toLowerCase(),o=document.querySelector("video");if(o&&("z"===t||"x"===t||"c"===t)&&!e.ctrlKey&&!e.altKey&&!e.metaKey){e.preventDefault(),e.stopPropagation();let n=o.playbackRate;"z"===t?Math.abs(o.playbackRate-1)<.01?n=lastCustomSpeed:(lastCustomSpeed=o.playbackRate,n=1):"x"===t?n=Math.max(.1,Math.round(10*(o.playbackRate-.1))/10):"c"===t&&(n=Math.min(16,Math.round(10*(o.playbackRate+.1))/10)),Math.abs(o.playbackRate-n)>.01&&(o.playbackRate=n,createNotification(n))}},!0),document.body.dataset.biliSpeedKeyListener="true",console.log("Bili Speed Control: Keyboard shortcut listener added.")}
+    function handleWheelEvent(e){if(!isInSpeedBox)return;e.preventDefault(),e.stopPropagation();const t=document.querySelector("video");if(!t)return;const o=-.1*Math.sign(e.deltaY);let n=t.playbackRate+o;n=Math.max(.1,Math.min(16,n)),n=Math.round(10*n)/10,Math.abs(t.playbackRate-n)>.01&&(t.playbackRate=n,createNotification(n))}
+    function initWheelControl(e){if("true"===e.dataset.biliSpeedWheelAdded)return;e.addEventListener("mouseenter",()=>{isInSpeedBox=!0,e.style.cursor="ns-resize"}),e.addEventListener("mouseleave",()=>{isInSpeedBox=!1,e.style.cursor=""}),e.addEventListener("wheel",handleWheelEvent,{passive:!1}),e.dataset.biliSpeedWheelAdded="true",console.log("Bili Speed Control: Wheel control added to speed box.")}
 
 })();
