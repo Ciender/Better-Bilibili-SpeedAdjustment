@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         更好的B站播放器视频倍速调节
 // @namespace    http://tampermonkey.net/
-// @version      2.3
-// @description  滚轮调节+C/X/Z键调节+兼容原生和其他html5插件+显示剩余时间
+// @version      2.4
+// @description  滚轮调节+C/X/Z键调节+双击恢复1倍速+兼容原生和其他html5插件+显示剩余时间
 // @match        *://*.bilibili.com/*
 // @grant        none
 // ==/UserScript==
@@ -267,6 +267,7 @@
                 initVideoListener(video);
                 addShortcutListener();
             }
+            // 使用更通用的选择器来匹配倍速控制按钮
             const speedBox = document.querySelector('.bpx-player-ctrl-playbackrate');
             if (speedBox) initWheelControl(speedBox);
 
@@ -285,6 +286,34 @@
     function updateActiveState(e){let t=!1;document.querySelectorAll(".bpx-player-ctrl-playbackrate-menu-item").forEach(o=>{if(!o.classList.contains("custom-speed")){const n=parseFloat(o.dataset.value||o.getAttribute("data-value")||"0");n&&Math.abs(n-e)<.01?(o.classList.add("active"),t=!0):o.classList.remove("active")}});const o=document.querySelector(".custom-speed");o&&o.classList.remove("active");const n=document.querySelector(".bpx-player-ctrl-playbackrate .bpx-player-ctrl-playbackrate-result");n&&(n.textContent=`${e.toFixed(1)}x`)}
     function addShortcutListener(){if("true"===document.body.dataset.biliSpeedKeyListener)return;document.addEventListener("keydown",function(e){if(dialogActive||e.target.matches("input, textarea, [contenteditable]"))return;const t=e.key.toLowerCase(),o=document.querySelector("video");if(o&&("z"===t||"x"===t||"c"===t)&&!e.ctrlKey&&!e.altKey&&!e.metaKey){e.preventDefault(),e.stopPropagation();let n=o.playbackRate;"z"===t?Math.abs(o.playbackRate-1)<.01?n=lastCustomSpeed:(lastCustomSpeed=o.playbackRate,n=1):"x"===t?n=Math.max(.1,Math.round(10*(o.playbackRate-.1))/10):"c"===t&&(n=Math.min(16,Math.round(10*(o.playbackRate+.1))/10)),Math.abs(o.playbackRate-n)>.01&&(o.playbackRate=n,createNotification(n))}},!0),document.body.dataset.biliSpeedKeyListener="true",console.log("Bili Speed Control: Keyboard shortcut listener added.")}
     function handleWheelEvent(e){if(!isInSpeedBox)return;e.preventDefault(),e.stopPropagation();const t=document.querySelector("video");if(!t)return;const o=-.1*Math.sign(e.deltaY);let n=t.playbackRate+o;n=Math.max(.1,Math.min(16,n)),n=Math.round(10*n)/10,Math.abs(t.playbackRate-n)>.01&&(t.playbackRate=n,createNotification(n))}
-    function initWheelControl(e){if("true"===e.dataset.biliSpeedWheelAdded)return;e.addEventListener("mouseenter",()=>{isInSpeedBox=!0,e.style.cursor="ns-resize"}),e.addEventListener("mouseleave",()=>{isInSpeedBox=!1,e.style.cursor=""}),e.addEventListener("wheel",handleWheelEvent,{passive:!1}),e.dataset.biliSpeedWheelAdded="true",console.log("Bili Speed Control: Wheel control added to speed box.")}
+
+    // --- MODIFIED FUNCTION ---
+    function initWheelControl(speedBoxElement){
+        if("true"===speedBoxElement.dataset.biliSpeedWheelAdded)return;
+
+        // 鼠标悬停时
+        speedBoxElement.addEventListener("mouseenter",()=>{isInSpeedBox=!0,speedBoxElement.style.cursor="ns-resize"});
+        speedBoxElement.addEventListener("mouseleave",()=>{isInSpeedBox=!1,speedBoxElement.style.cursor=""});
+
+        // 滚轮事件
+        speedBoxElement.addEventListener("wheel",handleWheelEvent,{passive:!1});
+
+        // --- 新增功能：双击事件 ---
+        speedBoxElement.addEventListener('dblclick', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const video = document.querySelector('video');
+            // 如果视频存在且当前速度不是1倍速，则进行重置
+            if (video && video.playbackRate !== 1.0) {
+                lastCustomSpeed = video.playbackRate; // 保存当前速度，以便'Z'键可以恢复
+                video.playbackRate = 1.0;
+                createNotification(1.0);
+            }
+        });
+        // -------------------------
+
+        speedBoxElement.dataset.biliSpeedWheelAdded="true";
+        console.log("Bili Speed Control: Wheel and Dblclick controls added to speed box.");
+    }
 
 })();
