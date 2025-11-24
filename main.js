@@ -1,425 +1,557 @@
 // ==UserScript==
-// @name         更好的B站播放器视频倍速调节 (最终修复版)
-// @version      4.7
-// @description  滚轮调节+C/X/Z键调节+双击恢复1倍速+兼容原生和其他html5插件+显示剩余时间
+// @name         更好的B站播放器视频倍速调节
+// @version      6.1
+// @description  滚轮调节+触控板优化+快捷键+嵌入式自定义输入(蓝边绿闪)+居中提示修复+新手引导
 // @author       Ciender
 // @match        *://*.bilibili.com/*
 // @grant        none
+// @run-at       document-end
 // ==/UserScript==
-
-
 
 (function() {
     'use strict';
 
     // =================================================================================
-    // --- 1. 用户配置 (USER CONFIGURATION) ---
-    // =================================================================================
-
-    const USER_CONFIG = {
-        /**
-         * 是否在F12控制台输出详细的调试日志。
-         * true:  开启日志 (默认)
-         * false: 关闭日志
-         */
-        enableConsoleLog: false,
-    };
-
-    // =================================================================================
-    // --- 2. 内部配置与状态管理 (Internal Config & State) ---
+    // --- 1. 配置与常量 (Config & Constants) ---
     // =================================================================================
 
     const CONFIG = {
-        minSpeed: 0.1,
-        maxSpeed: 16.0,
-        speedStep: 0.1,
-        timeUpdateThrottleDelay: 250,
+        min: 0.1,            // [Fix] 最低倍速修正为 0.1
+        max: 16.0,
+        mouseStep: 0.1,      // 鼠标滚轮步进
+        touchStep: 0.02,     // 触控板步进
+        touchThreshold: 30,  // 触控板防抖阈值
+        log: false,
+        tourVersion: '6.1_v1',
+        storageKey: 'bili_speed_v6_pref'
+    };
+
+    const SELECTORS = {
+        video: 'video',
+        // [Fix] 优先选择视频画面区域，确保提示框在全屏时也能绝对居中
+        videoArea: '.bpx-player-video-area, .bpx-player-video-wrap',
+        playerContainer: '#bilibili-player, .bpx-player-container, #playerWrap',
+        speedBox: '.bpx-player-ctrl-playbackrate',
+        speedMenu: '.bpx-player-ctrl-playbackrate-menu',
+        speedMenuItem: '.bpx-player-ctrl-playbackrate-menu-item',
+        speedResult: '.bpx-player-ctrl-playbackrate-result',
+        timeContainer: '.bpx-player-ctrl-time',
+        timeLabel: '.bpx-player-ctrl-time-label',
+        customInput: '#bili-speed-embedded-input'
     };
 
     const STATE = {
         lastCustomSpeed: 1.0,
-        currentNotification: null,
-        notificationTimer: null,
-        isMouseOverSpeedBox: false,
-        isDialogActive: false,
-        timeUpdateThrottleTimer: null,
-        internalSpeedChange: false, // 标记是否由本脚本内部函数触发的速度变更
-        lastKnownSpeed: 1.0,        // 持续追踪上一次的速度值，用于修复原生菜单日志
-        dragState: { isDragging: false, offsetX: 0, offsetY: 0 },
-        flags: {
-            isInitialRateChangeEvent: true, // 标记是否为视频加载后的首次ratechange事件
-            notificationStyleAdded: false,
-            shortcutListenerAdded: false,
-            timeDisplayInitialized: false,
-            initializedElements: new WeakMap(),
-        }
+        touchAccumulator: 0,
+        internalChange: false,
+        initMap: new WeakMap(),
+        isTourActive: false
     };
 
     // =================================================================================
-    // --- 3. 核心逻辑 (Core Logic) ---
+    // --- 2. 样式注入 (CSS Injection) ---
     // =================================================================================
 
-    function changeSpeed(newSpeed, triggerSource) {
-        const video = document.querySelector('video');
-        if (!video) return;
-        const oldSpeed = video.playbackRate;
-        let formattedSpeed = Math.max(CONFIG.minSpeed, Math.min(CONFIG.maxSpeed, newSpeed));
-        if (Math.abs(oldSpeed - formattedSpeed) > 0.001) {
-            STATE.internalSpeedChange = true;
-            video.playbackRate = formattedSpeed;
-            createNotification(formattedSpeed);
-            logSpeedChange(triggerSource, oldSpeed, formattedSpeed, video.currentTime);
+    const STYLES = `
+        /* 1. 中央提示框 (毛玻璃风格) - 居中修复 */
+        @keyframes biliSpeedFadeOut { from { opacity: 1; transform: translate(-50%, -50%) scale(1); } to { opacity: 0; transform: translate(-50%, -50%) scale(0.95); } }
+        .bili-speed-notifier {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.75); color: #fff; padding: 12px 24px;
+            border-radius: 8px; font-size: 18px; font-weight: bold; z-index: 100000;
+            pointer-events: none; text-align: center; backdrop-filter: blur(6px);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1);
+            animation: biliSpeedFadeOut 0.3s 0.8s forwards;
+            white-space: nowrap;
         }
-    }
+        .bili-speed-notifier span { font-size: 13px; font-weight: normal; color: #ccc; display: block; margin-top: 4px; }
 
-    function logSpeedChange(trigger, oldSpeed, newSpeed, currentTime) {
-        if (!USER_CONFIG.enableConsoleLog) return;
-        const displayNewSpeed = newSpeed.toFixed(2).replace(/\.?0+$/, '');
-        const displayOldSpeed = typeof oldSpeed === 'number' ? oldSpeed.toFixed(2).replace(/\.?0+$/, '') : oldSpeed;
-        console.groupCollapsed(`%c[BiliSpeedControl] %c速度变更: %c${displayNewSpeed}x`, 'color: #00a1d6; font-weight: bold;', 'color: default;', 'color: #f5222d; font-weight: bold;');
-        console.log(`触发方式: ${trigger}`);
-        console.log(`变更前速度: ${displayOldSpeed}x (实际值: ${oldSpeed})`);
-        console.log(`变更后速度: ${displayNewSpeed}x (实际值: ${newSpeed})`);
-        console.log(`视频时间点: ${formatTimeCompact(currentTime)}`);
-        console.groupEnd();
-    }
+        /* 2. 自定义时间显示 */
+        .bili-speed-time-wrap { display: flex; flex-direction: column; align-items: center; line-height: 1.3; pointer-events: none; }
+        .bili-speed-time-main { font-size: 13px; color: #eee; }
+        .bili-speed-time-sub { font-size: 12px; color: #999; transform: scale(0.9); }
 
-    // =================================================================================
-    // --- 4. 辅助函数 (Helper Functions) ---
-    // =================================================================================
+        /* 3. 嵌入式输入框 [Fix: 样式增强] */
+        .bili-speed-embedded-item {
+            padding: 5px 10px; cursor: default; display: flex; justify-content: center;
+            border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 5px;
+        }
+        @keyframes inputBlinkGreen {
+            0% { border-color: #4caf50; box-shadow: 0 0 4px rgba(76, 175, 80, 0.5); }
+            50% { border-color: #81c784; box-shadow: 0 0 10px rgba(76, 175, 80, 0.8); }
+            100% { border-color: #4caf50; box-shadow: 0 0 4px rgba(76, 175, 80, 0.5); }
+        }
+        .bili-speed-embedded-input {
+            width: 60px;
+            background: rgba(0, 0, 0, 0.3);
+            /* [Req] 默认蓝色描边 */
+            border: 2px solid #00a1d6;
+            color: #fff; text-align: center; border-radius: 4px; padding: 4px 0; font-size: 13px;
+            outline: none; transition: all 0.2s;
+            font-weight: bold;
+        }
+        .bili-speed-embedded-input:focus {
+            /* [Req] 点击/聚焦后 绿色闪烁 */
+            animation: inputBlinkGreen 1.2s infinite;
+            background: rgba(0, 0, 0, 0.6);
+        }
+        .bili-speed-embedded-input::-webkit-outer-spin-button,
+        .bili-speed-embedded-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 
-    function getPlayerContainer(videoElement) {
-        if (!videoElement) return document.body;
-        const container = videoElement.closest('.bpx-player-container, .player-container, #bilibili-player, #playerWrap');
-        return container || videoElement.parentElement || document.body;
-    }
+        /* 4. 新手引导系统 */
+        .tour-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 99999; pointer-events: none; }
+        .tour-highlight-box {
+            position: absolute; border: 2px solid #00a1d6; border-radius: 4px;
+            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.6); z-index: 100000; pointer-events: none;
+            transition: all 0.3s ease;
+        }
+        .tour-tooltip {
+            position: absolute; background: #fff; color: #333; padding: 16px; border-radius: 8px;
+            width: 280px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3); z-index: 100001;
+            font-size: 14px; line-height: 1.6; transition: all 0.3s ease;
+        }
+        .tour-tooltip h3 { margin: 0 0 8px 0; color: #00a1d6; font-size: 16px; }
+        .tour-footer { display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+        .tour-btn { padding: 5px 12px; border-radius: 4px; cursor: pointer; border: none; font-size: 12px; transition: 0.2s; }
+        .tour-btn-skip { background: #f0f0f0; color: #666; }
+        .tour-btn-next { background: #00a1d6; color: #fff; }
+        .tour-force-show { display: block !important; visibility: visible !important; opacity: 1 !important; }
+    `;
 
-    function formatTimeCompact(totalSeconds) {
-        if (isNaN(totalSeconds) || totalSeconds < 0 || !isFinite(totalSeconds)) return '--:--';
-        const hours = Math.floor(totalSeconds / 3600);
-        const minutes = Math.floor((totalSeconds % 3600) / 60);
-        const seconds = Math.floor(totalSeconds % 60);
-        const paddedMinutes = String(minutes).padStart(2, '0');
-        const paddedSeconds = String(seconds).padStart(2, '0');
-        return hours > 0 ? `${hours}:${paddedMinutes}:${paddedSeconds}` : `${paddedMinutes}:${paddedSeconds}`;
-    }
-
-    function formatRemainingTimeVerbose(totalSeconds) {
-        if (isNaN(totalSeconds) || totalSeconds <= 0 || !isFinite(totalSeconds)) return '';
-        const hours = Math.floor(totalSeconds / 3600);
-        const minutes = Math.floor((totalSeconds % 3600) / 60);
-        const seconds = Math.floor(totalSeconds % 60);
-        let timeString = '';
-        if (hours > 0) timeString += `${hours}时${minutes}分${seconds}秒`;
-        else if (minutes > 0) timeString += `${minutes}分${seconds}秒`;
-        else timeString += `${seconds}秒`;
-        return `剩余 ${timeString}`;
-    }
-
-    // =================================================================================
-    // --- 5. UI组件 (UI Components) ---
-    // =================================================================================
-
-    function ensureNotificationStyle() {
-        if (STATE.flags.notificationStyleAdded) return;
-        const styleId = 'bili-speed-enhancer-style';
-        if (document.getElementById(styleId)) { STATE.flags.notificationStyleAdded = true; return; }
+    function injectStyles() {
+        if (document.getElementById('bili-speed-v6-css')) return;
         const style = document.createElement('style');
-        style.id = styleId;
-        style.textContent = `@keyframes biliSpeedFadeOut{from{opacity:1}to{opacity:0}}.bili-speed-notifier{animation:biliSpeedFadeOut .3s .5s forwards}`;
+        style.id = 'bili-speed-v6-css';
+        style.textContent = STYLES;
         document.head.appendChild(style);
-        STATE.flags.notificationStyleAdded = true;
     }
 
-    function createNotification(speed) {
-        if (STATE.currentNotification && STATE.currentNotification.parentNode) {
-            STATE.currentNotification.parentNode.removeChild(STATE.currentNotification);
-            clearTimeout(STATE.notificationTimer);
+    // =================================================================================
+    // --- 3. 工具与状态管理 (Utils & State) ---
+    // =================================================================================
+
+    const Utils = {
+        fmtTime: (s) => {
+            if (!Number.isFinite(s) || s < 0) return '--:--';
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = Math.floor(s % 60);
+            return h > 0
+                ? `${h}:${m.toString().padStart(2,'0')}:${sec.toString().padStart(2,'0')}`
+                : `${m.toString().padStart(2,'0')}:${sec.toString().padStart(2,'0')}`;
+        },
+        fmtRemain: (s) => {
+            if (s <= 0 || !Number.isFinite(s)) return '';
+            const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+            let txt = '';
+            if (h) txt += `${h}时`;
+            if (m) txt += `${m}分`;
+            txt += `${sec}秒`;
+            return `剩余 ${txt}`;
+        },
+        clamp: (v) => Math.max(CONFIG.min, Math.min(CONFIG.max, v)),
+        // [Fix] 增强容器获取逻辑，优先获取视频画面容器
+        getContainer: () => {
+            return document.querySelector(SELECTORS.videoArea) ||
+                   document.querySelector(SELECTORS.playerContainer) ||
+                   document.body;
+        },
+        isTouchpad: (e) => e.deltaMode === 0 && Math.abs(e.deltaY) < 50
+    };
+
+    // =================================================================================
+    // --- 4. 核心逻辑 (Core Control) ---
+    // =================================================================================
+
+    function setSpeed(rawSpeed, source = 'Script') {
+        const video = document.querySelector(SELECTORS.video);
+        if (!video) return;
+
+        let speed = parseFloat(rawSpeed);
+        if (isNaN(speed)) return;
+
+        const finalSpeed = Utils.clamp(Number(speed.toFixed(2)));
+
+        if (Math.abs(video.playbackRate - finalSpeed) > 0.001) {
+            STATE.internalChange = true;
+            video.playbackRate = finalSpeed;
+
+            if (finalSpeed !== 1.0) STATE.lastCustomSpeed = finalSpeed;
+
+            showNotification(finalSpeed, video);
+            updateUI(finalSpeed);
+
+            if (CONFIG.log) console.log(`[Speed] ${finalSpeed}x via ${source}`);
         }
-        ensureNotificationStyle();
-        const video = document.querySelector('video');
-        const parentElement = getPlayerContainer(video);
+    }
+
+    function updateUI(speed) {
+        updateMenuHighlight(speed);
+        updateInputBox(speed);
+        updateTimeDisplay();
+    }
+
+    function showNotification(speed, video) {
+        if (STATE.isTourActive) return;
+
+        const old = document.querySelector('.bili-speed-notifier');
+        if (old) old.remove();
+
+        // 这里的 Container 获取非常关键，决定了是否居中于视频
+        const container = Utils.getContainer();
+        // 确保容器有定位属性，否则 absolute 会跑偏
+        if (getComputedStyle(container).position === 'static') {
+            container.style.position = 'relative';
+        }
+
         const div = document.createElement('div');
         div.className = 'bili-speed-notifier';
-        div.style.cssText = `position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,155,0,.8);color:#fff;padding:10px 18px;border-radius:5px;font-family:Arial,sans-serif;font-size:16px;font-weight:700;z-index:2147483647;pointer-events:none;box-shadow:0 3px 8px rgba(0,0,0,.3);white-space:nowrap;text-align:center`;
-        if (parentElement === document.body) div.style.position = 'fixed';
-        const displaySpeed = speed.toFixed(2).replace(/\.?0+$/, '');
-        let remainingText = '';
-        if (video && video.duration && isFinite(video.duration) && speed > 0) {
-            const remainingTime = (video.duration - video.currentTime) / speed;
-            const formattedTime = formatRemainingTimeVerbose(remainingTime);
-            if (formattedTime) remainingText = `<br><span style="font-size:14px;font-weight:400">${formattedTime}</span>`;
+
+        let extraHtml = '';
+        if (video && video.duration && speed > 0) {
+            const remain = (video.duration - video.currentTime) / speed;
+            extraHtml = `<span>${Utils.fmtRemain(remain)}</span>`;
         }
-        div.innerHTML = `倍速: ${displaySpeed}x${remainingText}`;
-        parentElement.appendChild(div);
-        STATE.currentNotification = div;
-        STATE.notificationTimer = setTimeout(() => {
-            if (div.parentNode) div.parentNode.removeChild(div);
-            STATE.currentNotification = null;
-        }, 800);
+        div.innerHTML = `${speed}x${extraHtml}`;
+        container.appendChild(div);
+
+        setTimeout(() => { if(div.parentNode) div.remove(); }, 1500);
     }
 
-    function updateCustomTimeDisplay() {
-        const video = document.querySelector('video');
-        const timeDisplayLine1 = document.getElementById('custom-time-display');
-        const speedTimeDisplayLine2 = document.getElementById('custom-speed-time-display');
-        if (!video || !timeDisplayLine1 || !speedTimeDisplayLine2) return;
-        const currentSpan = document.querySelector('.bpx-player-ctrl-time-current');
-        const durationSpan = document.querySelector('.bpx-player-ctrl-time-duration');
-        if (currentSpan && durationSpan) timeDisplayLine1.textContent = `${currentSpan.textContent} / ${durationSpan.textContent}`;
+    // =================================================================================
+    // --- 5. UI 组件逻辑 (UI Components) ---
+    // =================================================================================
+
+    function updateMenuHighlight(currentSpeed) {
+        document.querySelectorAll(SELECTORS.speedMenuItem).forEach(item => {
+            if (item.classList.contains('bili-speed-embedded-item')) return;
+            const val = parseFloat(item.dataset.value || item.getAttribute('data-value'));
+            if (Math.abs(val - currentSpeed) < 0.01) {
+                item.classList.add('bpx-state-active', 'active');
+            } else {
+                item.classList.remove('bpx-state-active', 'active');
+            }
+        });
+
+        const resultDiv = document.querySelector(SELECTORS.speedResult);
+        if (resultDiv) resultDiv.textContent = (currentSpeed === 1 ? '倍速' : `${currentSpeed.toFixed(1)}x`);
+    }
+
+    function updateInputBox(speed) {
+        const input = document.querySelector(SELECTORS.customInput);
+        if (input && document.activeElement !== input) {
+            input.value = speed.toFixed(2);
+        }
+    }
+
+    function updateTimeDisplay() {
+        const video = document.querySelector(SELECTORS.video);
+        const line1 = document.getElementById('bst-l1');
+        const line2 = document.getElementById('bst-l2');
+        const originalCurr = document.querySelector(SELECTORS.timeCurrent);
+        const originalDur = document.querySelector(SELECTORS.timeDuration);
+
+        if (!video || !line1 || !line2) return;
+
+        if (originalCurr && originalDur) {
+            line1.textContent = `${originalCurr.textContent} / ${originalDur.textContent}`;
+        } else {
+            line1.textContent = `${Utils.fmtTime(video.currentTime)} / ${Utils.fmtTime(video.duration)}`;
+        }
+
         const speed = video.playbackRate;
-        const displaySpeed = speed.toFixed(2).replace(/\.?0+$/, '');
-        const remainingSeconds = speed > 0 ? (video.duration - video.currentTime) / speed : Infinity;
-        speedTimeDisplayLine2.textContent = `(${displaySpeed}x, -${formatTimeCompact(remainingSeconds)})`;
+        const remain = speed > 0 ? (video.duration - video.currentTime) / speed : 0;
+        line2.textContent = `(${speed}x, -${Utils.fmtTime(remain)})`;
     }
 
-    function createCustomSpeedDialog() {
-        if (STATE.isDialogActive) return;
-        STATE.isDialogActive = true;
-        const video = document.querySelector("video");
-        const container = getPlayerContainer(video);
-        const dialog = document.createElement("div");
-        dialog.id = 'bili-speed-custom-dialog';
-        dialog.style.cssText = `position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:8px;box-shadow:0 5px 15px rgba(0,0,0,.3);min-width:300px;box-sizing:border-box;z-index:2147483647;display:flex;flex-direction:column`;
-        if (container === document.body) dialog.style.position = "fixed";
-        const titleBar = document.createElement("div");
-        titleBar.textContent = "设置播放速度";
-        titleBar.style.cssText = `padding:10px 15px;font-size:16px;font-weight:700;color:#333;text-align:center;cursor:move;border-bottom:1px solid #eee;user-select:none;-webkit-user-select:none`;
-        const content = document.createElement("div");
-        content.style.padding = "20px";
-        const input = document.createElement("input");
-        input.type = "number"; input.step = "0.01"; input.min = CONFIG.minSpeed; input.max = CONFIG.maxSpeed;
-        input.value = (video ? video.playbackRate : STATE.lastCustomSpeed).toFixed(2);
-        input.style.cssText = "width:100%;padding:10px 14px;margin-bottom:20px;border:1px solid #ccc;border-radius:4px;font-size:16px;box-sizing:border-box;text-align:center";
-        const buttonContainer = document.createElement("div");
-        buttonContainer.style.cssText = "display:flex;justify-content:space-around;gap:10px";
-        const confirmBtn = document.createElement("button");
-        confirmBtn.textContent = "确定";
-        confirmBtn.style.cssText = "padding:8px 20px;background:#00a1d6;border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:14px;flex-grow:1;transition:background-color .2s";
-        confirmBtn.onmouseover = () => confirmBtn.style.background = "#00b5e5";
-        confirmBtn.onmouseout = () => confirmBtn.style.background = "#00a1d6";
-        const cancelBtn = document.createElement("button");
-        cancelBtn.textContent = "取消";
-        cancelBtn.style.cssText = "padding:8px 20px;background:#f0f0f0;border:1px solid #ddd;border-radius:4px;cursor:pointer;font-size:14px;color:#555;flex-grow:1;transition:background-color .2s";
-        cancelBtn.onmouseover = () => cancelBtn.style.background = "#e0e0e0";
-        cancelBtn.onmouseout = () => cancelBtn.style.background = "#f0f0f0";
-        const closeDialog = () => { if (dialog.parentNode) dialog.parentNode.removeChild(dialog); STATE.isDialogActive = false; };
-        const confirmAction = () => {
-            const newSpeed = parseFloat(input.value);
-            if (!isNaN(newSpeed) && newSpeed >= CONFIG.minSpeed && newSpeed <= CONFIG.maxSpeed) { changeSpeed(newSpeed, "自定义对话框"); closeDialog(); }
-            else { input.style.borderColor = "#ff4d4d"; setTimeout(() => { input.style.borderColor = "#ccc"; }, 1000); input.focus(); input.select(); }
-        };
-        cancelBtn.addEventListener("click", closeDialog);
-        confirmBtn.addEventListener("click", confirmAction);
-        input.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); confirmAction(); } else if (e.key === "Escape") closeDialog(); });
-        const onDragStart = (e) => {
-            STATE.dragState.isDragging = true; STATE.dragState.offsetX = e.clientX - dialog.offsetLeft; STATE.dragState.offsetY = e.clientY - dialog.offsetTop;
-            document.addEventListener('mousemove', onDragging); document.addEventListener('mouseup', onDragEnd);
-        };
-        const onDragging = (e) => {
-            if (!STATE.dragState.isDragging) return;
-            const newX = e.clientX - STATE.dragState.offsetX; const newY = e.clientY - STATE.dragState.offsetY;
-            dialog.style.left = `${newX}px`; dialog.style.top = `${newY}px`; dialog.style.transform = 'none';
-        };
-        const onDragEnd = () => { STATE.dragState.isDragging = false; document.removeEventListener('mousemove', onDragging); document.removeEventListener('mouseup', onDragEnd); };
-        titleBar.addEventListener('mousedown', onDragStart);
-        buttonContainer.append(cancelBtn, confirmBtn); content.append(input, buttonContainer); dialog.append(titleBar, content);
-        container.appendChild(dialog); requestAnimationFrame(() => { input.focus(); input.select(); });
+    // 注入嵌入式输入框
+    function injectEmbeddedInput() {
+        const menu = document.querySelector(SELECTORS.speedMenu);
+        if (!menu || document.getElementById('bili-speed-embedded-input')) return;
+
+        const li = document.createElement('li');
+        li.className = 'bpx-player-ctrl-playbackrate-menu-item bili-speed-embedded-item';
+
+        const input = document.createElement('input');
+        input.id = 'bili-speed-embedded-input';
+        input.className = 'bili-speed-embedded-input';
+        input.type = 'number';
+        input.step = '0.1';
+        input.min = CONFIG.min;
+        input.max = CONFIG.max;
+        input.placeholder = '自定义';
+
+        const video = document.querySelector(SELECTORS.video);
+        if (video) input.value = video.playbackRate.toFixed(2);
+
+        input.addEventListener('click', (e) => e.stopPropagation());
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                setSpeed(input.value, 'InputBox');
+                input.blur();
+                menu.style.display = '';
+            }
+        });
+
+        if (menu.firstChild) {
+            menu.insertBefore(li, menu.firstChild);
+        } else {
+            menu.appendChild(li);
+        }
+        li.appendChild(input);
     }
 
     // =================================================================================
-    // --- 6. 事件处理器 (Event Handlers) ---
+    // --- 6. 输入处理 (Input Handling) ---
     // =================================================================================
 
-    function onWheel(event) {
-        if (!STATE.isMouseOverSpeedBox) return;
-        event.preventDefault(); event.stopPropagation();
-        const video = document.querySelector("video");
+    function handleWheel(e) {
+        e.preventDefault();
+        e.stopPropagation();
+
+        const video = document.querySelector(SELECTORS.video);
         if (!video) return;
-        const direction = -Math.sign(event.deltaY);
-        let newSpeed = Math.round((video.playbackRate + (direction * CONFIG.speedStep)) * 10) / 10;
-        changeSpeed(newSpeed, "滚轮");
-    }
 
-    function onKeyDown(event) {
-        if (STATE.isDialogActive || event.target.matches("input, textarea, [contenteditable]")) return;
-        const key = event.key.toLowerCase();
-        const video = document.querySelector("video");
-        if (!video || !['z', 'x', 'c'].includes(key) || event.ctrlKey || event.altKey || event.metaKey) return;
-        event.preventDefault(); event.stopPropagation();
-        let newSpeed = video.playbackRate;
-        let trigger = `快捷键 '${key}'`;
-        if (key === 'z') {
-            if (Math.abs(video.playbackRate - 1.0) < 0.001) newSpeed = STATE.lastCustomSpeed;
-            else { STATE.lastCustomSpeed = video.playbackRate; newSpeed = 1.0; }
+        let currentRate = video.playbackRate;
+        let deltaRate = 0;
+
+        if (Utils.isTouchpad(e)) {
+            STATE.touchAccumulator += e.deltaY;
+            if (Math.abs(STATE.touchAccumulator) > CONFIG.touchThreshold) {
+                const direction = STATE.touchAccumulator > 0 ? 1 : -1;
+                deltaRate = direction * -1 * CONFIG.touchStep;
+                STATE.touchAccumulator = 0;
+            }
         } else {
-            const direction = (key === 'c' ? 1 : -1);
-            newSpeed = Math.round((video.playbackRate + (direction * CONFIG.speedStep)) * 10) / 10;
+            const direction = Math.sign(e.deltaY);
+            deltaRate = direction * -1 * CONFIG.mouseStep;
         }
-        changeSpeed(newSpeed, trigger);
-    }
 
-    function onDoubleClick(event) {
-        event.preventDefault(); event.stopPropagation();
-        const video = document.querySelector('video');
-        if (video && video.playbackRate !== 1.0) {
-            STATE.lastCustomSpeed = video.playbackRate;
-            changeSpeed(1.0, "双击重置");
+        if (deltaRate !== 0) {
+            setSpeed(currentRate + deltaRate, 'Wheel/Touch');
         }
     }
 
-    /**
-     * 视频速度变化事件处理器 (核心修复逻辑)
-     */
-    function onRateChange(event) {
-        const video = event.target;
-        const oldSpeed = STATE.lastKnownSpeed;
-        const newSpeed = video.playbackRate;
+    function handleKeys(e) {
+        if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA' || document.activeElement.isContentEditable) return;
+        if (e.ctrlKey || e.altKey || e.metaKey) return;
 
-        // **修复1: 处理首次加载**
-        // 如果是首次事件，则不显示通知，只更新UI和状态，然后退出
-        if (STATE.flags.isInitialRateChangeEvent) {
-            STATE.flags.isInitialRateChangeEvent = false; // 关闭标志
-            // 照常更新所有UI状态
-            if (newSpeed !== 1.0) STATE.lastCustomSpeed = newSpeed;
-            updateActiveState(newSpeed);
-            updateCustomTimeDisplay();
-            STATE.lastKnownSpeed = newSpeed; // 更新速度记录
-            return;
+        const key = e.key.toLowerCase();
+        if (!['z', 'x', 'c'].includes(key)) return;
+
+        const video = document.querySelector(SELECTORS.video);
+        if (!video) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (key === 'c') {
+            setSpeed(video.playbackRate + CONFIG.mouseStep, 'Key_C');
+        } else if (key === 'x') {
+            setSpeed(video.playbackRate - CONFIG.mouseStep, 'Key_X');
+        } else if (key === 'z') {
+            if (Math.abs(video.playbackRate - 1.0) < 0.01) {
+                setSpeed(STATE.lastCustomSpeed, 'Key_Z');
+            } else {
+                STATE.lastCustomSpeed = video.playbackRate;
+                setSpeed(1.0, 'Key_Z');
+            }
         }
-
-        // **修复2: 处理原生菜单兼容性**
-        if (STATE.internalSpeedChange) {
-            // 来源是本脚本，通知和日志已处理，只需重置标志位
-            STATE.internalSpeedChange = false;
-        } else {
-            // 来源是外部（如原生菜单），在此处创建通知和日志
-            createNotification(newSpeed);
-            logSpeedChange("外部/原生菜单", oldSpeed, newSpeed, video.currentTime);
-        }
-
-        // --- 通用UI更新 ---
-        if (newSpeed !== 1.0) STATE.lastCustomSpeed = newSpeed;
-        updateActiveState(newSpeed);
-        updateCustomTimeDisplay();
-
-        // **关键**：在事件处理的最后，更新速度记录
-        STATE.lastKnownSpeed = newSpeed;
     }
 
-    /** 辅助函数: 仅用于更新B站原生菜单的UI active状态 */
-    function updateActiveState(currentSpeed) {
-        document.querySelectorAll(".bpx-player-ctrl-playbackrate-menu-item:not(.custom-speed)").forEach(item => {
-            const speedVal = parseFloat(item.dataset.value || item.getAttribute("data-value"));
-            item.classList.toggle('active', speedVal && Math.abs(speedVal - currentSpeed) < 0.001);
+    // =================================================================================
+    // --- 7. 新手引导系统 (Tour Guide) ---
+    // =================================================================================
+
+    class TourGuide {
+        constructor() {
+            this.steps = [];
+            this.index = 0;
+            this.overlay = null;
+            this.tooltip = null;
+            this.box = null;
+        }
+
+        shouldRun() {
+            return localStorage.getItem('bili_speed_tour_done') !== CONFIG.tourVersion;
+        }
+
+        start() {
+            if (!this.shouldRun()) return;
+            setTimeout(() => this.init(), 1000);
+        }
+
+        init() {
+            STATE.isTourActive = true;
+            this.createElements();
+            this.defineSteps();
+            this.showStep(0);
+        }
+
+        createElements() {
+            this.box = document.createElement('div');
+            this.box.className = 'tour-highlight-box';
+
+            this.tooltip = document.createElement('div');
+            this.tooltip.className = 'tour-tooltip';
+
+            document.body.append(this.box, this.tooltip);
+        }
+
+        defineSteps() {
+            this.steps = [
+                {
+                    sel: SELECTORS.speedBox,
+                    title: '倍速控制增强',
+                    text: '👋 欢迎使用！<br>把鼠标悬停在这里，可以直接使用<b>滚轮</b>调节速度。<br>我们专门优化了<b>触控板</b>，体验丝滑。'
+                },
+                {
+                    sel: SELECTORS.customInput,
+                    title: '自定义输入框 (已更新)',
+                    text: '🔢 <b>输入框更显眼了！</b><br>现在有清晰的蓝色描边。点击它，会变成绿色闪烁，直接输入数字并回车即可。',
+                    prepare: () => {
+                        const menu = document.querySelector(SELECTORS.speedMenu);
+                        if(menu) menu.classList.add('tour-force-show');
+                    },
+                    cleanup: () => {
+                        const menu = document.querySelector(SELECTORS.speedMenu);
+                        if(menu) menu.classList.remove('tour-force-show');
+                    }
+                },
+                {
+                    sel: null,
+                    title: '快捷键与记忆',
+                    text: '⌨️ <b>快捷键：</b><br>C 加速 / X 减速 / Z 重置<br><br>💾 <b>自动记忆：</b><br>我们会记住你的播放速度，下次自动应用。'
+                }
+            ];
+        }
+
+        showStep(i) {
+            if (i >= this.steps.length) return this.end();
+            this.index = i;
+            const step = this.steps[i];
+
+            if (this.currentCleanup) this.currentCleanup();
+            if (step.prepare) step.prepare();
+            this.currentCleanup = step.cleanup;
+
+            let rect;
+            if (step.sel) {
+                const el = document.querySelector(step.sel);
+                if (el) rect = el.getBoundingClientRect();
+            }
+
+            if (rect) {
+                this.box.style.display = 'block';
+                this.box.style.width = rect.width + 'px';
+                this.box.style.height = rect.height + 'px';
+                this.box.style.top = (rect.top + window.scrollY) + 'px';
+                this.box.style.left = (rect.left + window.scrollX) + 'px';
+
+                this.tooltip.style.top = (rect.top + window.scrollY) + 'px';
+                this.tooltip.style.left = (rect.left + window.scrollX - 300) + 'px';
+                this.tooltip.style.transform = '';
+            } else {
+                this.box.style.display = 'none';
+                this.tooltip.style.top = '50%';
+                this.tooltip.style.left = '50%';
+                this.tooltip.style.transform = 'translate(-50%, -50%)';
+            }
+
+            this.tooltip.innerHTML = `
+                <h3>${step.title}</h3>
+                <div>${step.text}</div>
+                <div class="tour-footer">
+                    <button class="tour-btn tour-btn-skip">跳过</button>
+                    <button class="tour-btn tour-btn-next">${i === this.steps.length - 1 ? '完成' : '下一步'}</button>
+                </div>
+            `;
+
+            this.tooltip.querySelector('.tour-btn-next').onclick = () => this.showStep(i + 1);
+            this.tooltip.querySelector('.tour-btn-skip').onclick = () => this.end();
+        }
+
+        end() {
+            if (this.currentCleanup) this.currentCleanup();
+            this.box.remove();
+            this.tooltip.remove();
+            STATE.isTourActive = false;
+            localStorage.setItem('bili_speed_tour_done', CONFIG.tourVersion);
+        }
+    }
+
+    // =================================================================================
+    // --- 8. 初始化与事件绑定 (Init & Events) ---
+    // =================================================================================
+
+    function initVideoEvents(video) {
+        if (STATE.initMap.has(video)) return;
+
+        video.addEventListener('ratechange', () => {
+            if (STATE.internalChange) {
+                STATE.internalChange = false;
+            } else {
+                showNotification(video.playbackRate, video);
+                if (video.playbackRate !== 1) STATE.lastCustomSpeed = video.playbackRate;
+            }
+            updateUI(video.playbackRate);
         });
-        const resultEl = document.querySelector(".bpx-player-ctrl-playbackrate-result");
-        if (resultEl) resultEl.textContent = `${currentSpeed.toFixed(1)}x`;
-    }
 
-    function onTimeUpdateThrottled() {
-        if (STATE.timeUpdateThrottleTimer) return;
-        STATE.timeUpdateThrottleTimer = setTimeout(() => {
-            updateCustomTimeDisplay();
-            STATE.timeUpdateThrottleTimer = null;
-        }, CONFIG.timeUpdateThrottleDelay);
-    }
-
-    // =================================================================================
-    // --- 7. 初始化器 (Initializers) ---
-    // =================================================================================
-
-    function initCustomTimeDisplay() {
-        if (STATE.flags.timeDisplayInitialized) return;
-        const timeContainer = document.querySelector('.bpx-player-ctrl-time');
-        const originalLabel = timeContainer?.querySelector('.bpx-player-ctrl-time-label');
-        if (!timeContainer || !originalLabel) return;
-        timeContainer.style.cssText = 'position:relative;display:flex;justify-content:center;align-items:center;width:120px';
-        const newContainer = document.createElement('div');
-        newContainer.style.cssText = 'display:flex;flex-direction:column;align-items:center;line-height:1.2;pointer-events:none';
-        newContainer.innerHTML = '<div id="custom-time-display" style="font-size:13px;color:#e0e0e0"></div><div id="custom-speed-time-display" style="font-size:12px;color:#999"></div>';
-        timeContainer.appendChild(newContainer);
-        originalLabel.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;opacity:0;z-index:1;cursor:pointer';
-        STATE.flags.timeDisplayInitialized = true;
-        updateCustomTimeDisplay();
-    }
-
-    function initVideoListeners(video) {
-        if (STATE.flags.initializedElements.has(video)) return;
-
-        // **关键**：在添加监听器前，设置首次加载标志并初始化速度记录
-        STATE.flags.isInitialRateChangeEvent = true;
-        STATE.lastKnownSpeed = video.playbackRate;
-
-        video.addEventListener('ratechange', onRateChange);
-        video.addEventListener('timeupdate', onTimeUpdateThrottled);
-        video.addEventListener('loadedmetadata', updateCustomTimeDisplay);
-        video.addEventListener('seeked', updateCustomTimeDisplay);
-
-        STATE.flags.initializedElements.set(video, true);
-        if (video.playbackRate !== 1.0) STATE.lastCustomSpeed = video.playbackRate;
-
-        // 首次加载时手动调用一次UI更新，确保界面正确显示初始状态
-        updateActiveState(video.playbackRate);
-        updateCustomTimeDisplay();
-    }
-
-    function initSpeedBoxControls(speedBox) {
-        if (STATE.flags.initializedElements.has(speedBox)) return;
-        speedBox.addEventListener("mouseenter", () => { STATE.isMouseOverSpeedBox = true; speedBox.style.cursor = "ns-resize"; });
-        speedBox.addEventListener("mouseleave", () => { STATE.isMouseOverSpeedBox = false; speedBox.style.cursor = ""; });
-        speedBox.addEventListener("wheel", onWheel, { passive: false });
-        speedBox.addEventListener('dblclick', onDoubleClick);
-        STATE.flags.initializedElements.set(speedBox, true);
-    }
-
-    function initShortcutListener() {
-        if (STATE.flags.shortcutListenerAdded) return;
-        document.addEventListener("keydown", onKeyDown, true);
-        STATE.flags.shortcutListenerAdded = true;
-    }
-
-    function initCustomSpeedMenuItem(menu) {
-        if (menu.querySelector('.custom-speed')) return;
-        const item = document.createElement("li");
-        item.className = "bpx-player-ctrl-playbackrate-menu-item custom-speed";
-        item.textContent = "自定义倍速";
-        item.style.cssText = "cursor:pointer;padding:5px 0;text-align:center;font-size:12px";
-        item.addEventListener("click", e => { e.stopPropagation(); createCustomSpeedDialog(); });
-        item.onmouseover = () => item.style.backgroundColor = "rgba(255,255,255,.1)";
-        item.onmouseout = () => item.style.backgroundColor = "";
-        menu.appendChild(item);
-    }
-
-    // =================================================================================
-    // --- 8. 调试与公共API (Debug & Public API) ---
-    // =================================================================================
-
-    const BiliSpeedControlAPI = {
-        setSpeed: (speed) => { if (typeof speed !== 'number') { console.error('[BiliSpeedControl] Error: speed must be a number.'); return; } changeSpeed(speed, "API Call: setSpeed()"); },
-        resetSpeed: () => BiliSpeedControlAPI.setSpeed(1.0),
-        toggleLogging: (enable) => { if (typeof enable === 'boolean') USER_CONFIG.enableConsoleLog = enable; else USER_CONFIG.enableConsoleLog = !USER_CONFIG.enableConsoleLog; console.log(`%c[BiliSpeedControl] Console logging is now ${USER_CONFIG.enableConsoleLog ? 'ENABLED' : 'DISABLED'}.`, 'color: #00a1d6; font-weight: bold;'); },
-        getStatus: () => { const video = document.querySelector('video'); return { isLoggingEnabled: USER_CONFIG.enableConsoleLog, currentSpeed: video ? video.playbackRate : 'N/A', lastCustomSpeed: STATE.lastCustomSpeed, isDialogActive: STATE.isDialogActive, }; }
-    };
-    window.BiliSpeedControlAPI = BiliSpeedControlAPI;
-
-    // =================================================================================
-    // --- 9. 主执行逻辑 (Main Execution) ---
-    // =================================================================================
-
-    function main() {
-        requestAnimationFrame(() => {
-            const video = document.querySelector('video');
-            if (video) { initCustomTimeDisplay(); initVideoListeners(video); initShortcutListener(); }
-            const speedBox = document.querySelector('.bpx-player-ctrl-playbackrate');
-            if (speedBox) initSpeedBoxControls(speedBox);
-            const speedMenu = document.querySelector('.bpx-player-ctrl-playbackrate-menu');
-            if (speedMenu) initCustomSpeedMenuItem(speedMenu);
+        let tick = false;
+        video.addEventListener('timeupdate', () => {
+            if (tick) return;
+            tick = true;
+            setTimeout(() => { updateTimeDisplay(); tick = false; }, 500);
         });
+
+        STATE.initMap.set(video, true);
+        updateUI(video.playbackRate);
     }
 
-    console.log("%c[BiliSpeedControl] %c脚本已启动，开始监视播放器...", 'color: #00a1d6; font-weight: bold;', 'color: default;');
-    const observer = new MutationObserver(main);
-    observer.observe(document.body, { childList: true, subtree: true });
+    function initUI() {
+        const speedBox = document.querySelector(SELECTORS.speedBox);
+        if (speedBox && !STATE.initMap.has(speedBox)) {
+            speedBox.addEventListener('wheel', handleWheel, { passive: false });
+            speedBox.addEventListener('dblclick', (e) => { e.stopPropagation(); setSpeed(1.0, 'DblClick'); });
+            STATE.initMap.set(speedBox, true);
+        }
+
+        injectEmbeddedInput();
+
+        const timeContainer = document.querySelector(SELECTORS.timeContainer);
+        const label = document.querySelector(SELECTORS.timeLabel);
+        if (timeContainer && label && !document.getElementById('bst-l1')) {
+            label.style.opacity = '0';
+            label.style.position = 'absolute';
+            label.style.pointerEvents = 'none';
+            const wrap = document.createElement('div');
+            wrap.className = 'bili-speed-time-wrap';
+            wrap.innerHTML = `<div id="bst-l1" class="bili-speed-time-main">--:-- / --:--</div><div id="bst-l2" class="bili-speed-time-sub"></div>`;
+            timeContainer.style.justifyContent = 'center';
+            timeContainer.appendChild(wrap);
+        }
+    }
+
+    function mainLoop() {
+        const video = document.querySelector(SELECTORS.video);
+        if (video) {
+            initVideoEvents(video);
+            initUI();
+
+            if (!window._biliSpeedTourInited) {
+                window._biliSpeedTourInited = true;
+                new TourGuide().start();
+            }
+        }
+    }
+
+    injectStyles();
+    document.addEventListener('keydown', handleKeys, true);
+    setInterval(mainLoop, 1000);
+
+    console.log('[BiliSpeedControl] v6.1 Loaded');
 
 })();
