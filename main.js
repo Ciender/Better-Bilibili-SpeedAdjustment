@@ -423,8 +423,8 @@
                 },
                 {
                     sel: null,
-                    title: '快捷键与记忆',
-                    text: '⌨️ <b>快捷键：</b><br>C 加速 / X 减速 / Z 重置<br><br>💾 <b>自动记忆：</b><br>我们会记住你的播放速度，下次自动应用。'
+                    title: '快捷键',
+                    text: '⌨️ <b>快捷键：</b><br>C 加速 / X 减速 / Z 重置<br><br>'
                 }
             ];
         }
@@ -555,3 +555,4 @@
     console.log('[BiliSpeedControl] v6.1 Loaded');
 
 })();
+
